@@ -1,20 +1,47 @@
+#include <stdio.h>
+
 #define STATIC_ARRAY_SIZE(A) (sizeof(A)/sizeof(0[A]))
+
+#define ASSERT(EX) ((EX) ? 1 : (__debugbreak(), 0))
 
 typedef signed __int8  s8;
 typedef signed __int16 s16;
 typedef signed __int32 s32;
 typedef signed __int64 s64;
 
+#define S8_MIN   (s8)(0x80)
+#define S16_MIN (s16)(0x8000)
+#define S32_MIN (s32)(0x80000000)
+#define S64_MIN (s64)(0x8000000000000000)
+
+#define S8_MAX   (s8)(0x7F)
+#define S16_MAX (s16)(0x7FFF)
+#define S32_MAX (s32)(0x7FFFFFFF)
+#define S64_MAX (s64)(0x7FFFFFFFFFFFFFFF)
+
 typedef unsigned __int8  u8;
 typedef unsigned __int16 u16;
 typedef unsigned __int32 u32;
 typedef unsigned __int64 u64;
 
+#define U8_MAX   (u8)(0xFF)
+#define U16_MAX (u16)(0xFFFF)
+#define U32_MAX (u32)(0xFFFFFFFF)
+#define U64_MAX (u64)(0xFFFFFFFFFFFFFFFF)
+
 typedef s64 smm;
 typedef u64 umm;
 
+#define SMM_MIN S64_MIN
+#define SMM_MAX S64_MAX
+#define UMM_MAX U64_MAX
+
 typedef s64 sint;
 typedef u64 uint;
+
+#define SINT_MIN S64_MIN
+#define SINT_MAX S64_MAX
+#define UINT_MAX U64_MAX
 
 typedef u8 bool;
 #define true 1
@@ -83,6 +110,26 @@ StringBuilder_PushChar(String_Builder* builder, u8 c)
 {
 	if (builder->size == builder->capacity) builder->is_clipped = true;
 	else                                    builder->data[builder->size++] = c;
+
+	return !builder->is_clipped;
+}
+
+bool
+StringBuilder_PushInt(String_Builder* builder, sint i)
+{
+	if (i < 0)
+	{
+		StringBuilder_PushChar(builder, '-');
+		i = -i;
+	}
+
+	for (;;)
+	{
+		StringBuilder_PushChar(builder, '0' + i%10);
+
+		i /= 10;
+		if (i == 0) break;
+	}
 
 	return !builder->is_clipped;
 }
@@ -160,9 +207,28 @@ EncodeAndPushString(String_Builder* builder, String s)
 	for (umm i = 0; i < s.size; ++i) EncodeAndPushChar(builder, s.data[i]);
 }
 
-bool
-MarkupToHTML(String in, String_Builder* out)
+void
+MarkupError(String_Builder* error_report, umm offset_to_start, umm offset_to_line, umm line, String message)
 {
+	ASSERT(line < SINT_MAX);
+	ASSERT(offset_to_start < SINT_MAX);
+
+	StringBuilder_PushChar(error_report, '(');
+	StringBuilder_PushInt(error_report, (sint)line);
+	StringBuilder_PushChar(error_report, ',');
+	StringBuilder_PushInt(error_report, (sint)(offset_to_start - offset_to_line));
+	StringBuilder_PushString(error_report, STRING("): "));
+	StringBuilder_PushString(error_report, message);
+}
+
+bool
+MarkupToHTML(String in, String_Builder* out, String_Builder* error_report)
+{
+	String original_in  = in;
+	uint offset_to_line = 0;
+	uint line           = 1;
+#define MARKUP_ERROR(S) MarkupError(error_report, offset_to_line, line, offset_to_start, STRING(S))
+
 	union
 	{
 		struct {
@@ -176,6 +242,8 @@ MarkupToHTML(String in, String_Builder* out)
 
 	while (in.size != 0)
 	{
+		umm offset_to_start = in.data - original_in.data;
+
 		if (in.data[0] == '*')
 		{
 			u8 bold_level = 1;
@@ -196,7 +264,8 @@ MarkupToHTML(String in, String_Builder* out)
 			{
 				if (style.bold_level != bold_level)
 				{
-					//// ERROR: previous level must be closed before opening another
+					//// ERROR
+					MARKUP_ERROR("previous level must be closed before opening another");
 					return false;
 				}
 				else
@@ -225,7 +294,8 @@ MarkupToHTML(String in, String_Builder* out)
 		{
 			if (style.heading_level != 0)
 			{
-				//// ERROR: headings cannot be nested
+				//// ERROR
+				MARKUP_ERROR("headings cannot be nested");
 				return false;
 			}
 			else
@@ -235,12 +305,14 @@ MarkupToHTML(String in, String_Builder* out)
 
 				if (heading_level > 6)
 				{
-					//// ERROR: heading level too high
+					//// ERROR
+					MARKUP_ERROR("heading level too high");
 					return false;
 				}
 				else if (in.size < heading_level + 1 || in.data[heading_level] != ' ')
 				{
-					//// ERROR: missing space after heading marker
+					//// ERROR
+					MARKUP_ERROR("missing space after heading marker");
 					return false;
 				}
 				else
@@ -259,7 +331,8 @@ MarkupToHTML(String in, String_Builder* out)
 		{
 			if (style.style_val != 0)
 			{
-				//// ERROR: unterminated style
+				//// ERROR
+				MARKUP_ERROR("unterminated style");
 				return false;
 			}
 			else
@@ -273,7 +346,8 @@ MarkupToHTML(String in, String_Builder* out)
 
 					if (in.size == 0)
 					{
-						//// ERROR: Missing terminating backtick after raw block
+						//// ERROR
+						MARKUP_ERROR("Missing terminating backtick after raw block");
 						return false;
 					}
 					else
@@ -295,7 +369,8 @@ MarkupToHTML(String in, String_Builder* out)
 					{
 						if (in.size < 3)
 						{
-							//// ERROR: Missing terminating triple backtick after code block
+							//// ERROR
+							MARKUP_ERROR("Missing terminating triple backtick after code block");
 						}
 						else if (in.data[0] == '`' && in.data[1] == '`' && in.data[2] == '`')
 						{
@@ -342,7 +417,8 @@ MarkupToHTML(String in, String_Builder* out)
 										if (in.size > 2) in = String_EatN(in, 2);
 										else
 										{
-											//// ERROR: Missing escape sequence after backslash in string literal
+											//// ERROR
+											MARKUP_ERROR("Missing escape sequence after backslash in string literal");
 											return false;
 										}
 									}
@@ -351,7 +427,8 @@ MarkupToHTML(String in, String_Builder* out)
 
 								if (in.size == 0)
 								{
-									//// ERROR: Missing terminating quote after string literal
+									//// ERROR
+									MARKUP_ERROR("Missing terminating quote after string literal");
 									return false;
 								}
 								else
@@ -377,7 +454,8 @@ MarkupToHTML(String in, String_Builder* out)
 
 									if (in.size == 0)
 									{
-										//// ERROR: Missing decimals of float literal
+										//// ERROR
+										MARKUP_ERROR("Missing decimals of float literal");
 										return false;
 									}
 									else
@@ -390,7 +468,8 @@ MarkupToHTML(String in, String_Builder* out)
 
 											if (in.size == 0)
 											{
-												//// ERROR: Missing digits of float exponent
+												//// ERROR
+												MARKUP_ERROR("Missing digits of float exponent");
 												return false;
 											}
 											else while (in.size != 0 && Char_IsDigit(in.data[0])) in = String_EatN(in, 1);
@@ -415,7 +494,8 @@ MarkupToHTML(String in, String_Builder* out)
 		{
 			if (style.style_val != 0)
 			{
-				//// ERROR: links cannot be styled
+				//// ERROR
+				MARKUP_ERROR("links cannot be styled");
 				return false;
 			}
 			else
@@ -425,7 +505,8 @@ MarkupToHTML(String in, String_Builder* out)
 
 				if (in.size == 0)
 				{
-					//// ERROR: Missing terminating ] after link text
+					//// ERROR
+					MARKUP_ERROR("Missing terminating ] after link text");
 				}
 				else
 				{
@@ -434,12 +515,14 @@ MarkupToHTML(String in, String_Builder* out)
 
 					if (link_text.size == 0)
 					{
-						//// ERROR: Link must have link text to display
+						//// ERROR
+						MARKUP_ERROR("Link must have link text to display");
 						return false;
 					}
 					else if (in.size == 0 || in.data[0] != '(')
 					{
-						//// ERROR: Missing open parenthesis after link text
+						//// ERROR
+						MARKUP_ERROR("Missing open parenthesis after link text");
 						return false;
 					}
 					else
@@ -452,12 +535,14 @@ MarkupToHTML(String in, String_Builder* out)
 
 						if (in.size == 0)
 						{
-							//// ERROR: Missing terminating close parenthesis after link destination
+							//// ERROR
+							MARKUP_ERROR("Missing terminating close parenthesis after link destination");
 							return false;
 						}
 						else if (link_dest.size == 0)
 						{
-							//// ERROR: Link must have a valid destination url
+							//// ERROR
+							MARKUP_ERROR("Link must have a valid destination url");
 							return false;
 						}
 						else
@@ -488,12 +573,16 @@ MarkupToHTML(String in, String_Builder* out)
 
 				StringBuilder_PushChar(out, '\n');
 				in = String_EatN(in, 1);
+
+				line          += 1;
+				offset_to_line = in.data - original_in.data;
 			}
 			else if (in.data[0] == '\\')
 			{
 				if (in.size < 2)
 				{
-					//// ERROR: Missing character to escape after backslash
+					//// ERROR
+					MARKUP_ERROR("Missing character to escape after backslash");
 					return false;
 				}
 				else
